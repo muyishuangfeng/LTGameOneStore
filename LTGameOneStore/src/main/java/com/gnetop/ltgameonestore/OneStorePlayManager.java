@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.text.TextUtils;
+import android.util.Base64;
 import android.util.Log;
 
 import com.gnetop.ltgamecommon.impl.OnCreateOrderListener;
@@ -16,21 +17,33 @@ import com.onestore.iap.api.IapResult;
 import com.onestore.iap.api.PurchaseClient;
 import com.onestore.iap.api.PurchaseData;
 
+import java.security.InvalidKeyException;
+import java.security.KeyFactory;
+import java.security.NoSuchAlgorithmException;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.SignatureException;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-public class OneStorePayManager {
+public class OneStorePlayManager {
 
     private PurchaseClient mPurchaseClient;
-    private static OneStorePayManager sInstance;
+    private static OneStorePlayManager sInstance;
     private static final int IAP_API_VERSION = 5;
-    private static final String TAG = OneStorePayManager.class.getSimpleName();
+    private static final String TAG = OneStorePlayManager.class.getSimpleName();
     private static String devPayLoad;
+    private static final String KEY_FACTORY_ALGORITHM = "RSA";
+    private static final String SIGNATURE_ALGORITHM = "SHA512withRSA";
+    private String mPublicKey;
 
 
-    private OneStorePayManager(Context context, String publickey) {
+    private OneStorePlayManager(Context context, String publickey) {
         mPurchaseClient = new PurchaseClient(context, publickey);
+        this.mPublicKey=publickey;
     }
 
     /**
@@ -38,11 +51,11 @@ public class OneStorePayManager {
      *
      * @return
      */
-    public static OneStorePayManager getInstance(Context context, String publickey) {
+    public static OneStorePlayManager getInstance(Context context, String publickey) {
         if (sInstance == null) {
-            synchronized (OneStorePayManager.class) {
+            synchronized (OneStorePlayManager.class) {
                 if (sInstance == null) {
-                    sInstance = new OneStorePayManager(context, publickey);
+                    sInstance = new OneStorePlayManager(context, publickey);
                 }
             }
         }
@@ -134,7 +147,7 @@ public class OneStorePayManager {
     }
 
     /**
-     * 查看购买的历史记录
+     * 查看历史记录
      */
     private void loadPurchases(Activity context, final String url,
                                final String LTAppID, final String LTAppKey,
@@ -145,7 +158,7 @@ public class OneStorePayManager {
     }
 
     /**
-     * 加载购买数据
+     * 加载数据
      *
      * @param context     上下文
      * @param productType 产品类型
@@ -163,7 +176,6 @@ public class OneStorePayManager {
                 new PurchaseClient.QueryPurchaseListener() {
                     @Override
                     public void onSuccess(List<PurchaseData> purchaseDataList, String productType) {
-                        //TODO:
                         if (purchaseDataList.toString().contains(devPayLoad)) {
                             uploadServer(url, LTAppID, LTAppKey, purchaseDataList.get(0).getPurchaseId(), mUpLoadListener);
                         }
@@ -212,7 +224,7 @@ public class OneStorePayManager {
         Log.e(TAG, "onLoadPurchaseInApp() :: purchaseDataList - " + purchaseDataList.toString());
         for (PurchaseData purchase : purchaseDataList) {
             Log.e(TAG, "========onLoadPurchaseInApp=============" + purchase.toString());
-            boolean result = AppSecurity.verifyPurchase(purchase.getPurchaseData(), purchase.getSignature());
+            boolean result = verifyPurchase(purchase.getPurchaseData(), purchase.getSignature());
             if (result) {
                 consumeItem(purchase, mListener);
             }
@@ -220,7 +232,7 @@ public class OneStorePayManager {
     }
 
     /**
-     * 对于来自 "购买历史记录查询" 的每月产品 (自动), 将执行签名验证, 如果成功, 则为游戏 ui 方案保存产品信息。
+     * 对于来自 "历史记录查询" 的每月产品 (自动), 将执行签名验证, 如果成功, 则为游戏 ui 方案保存产品信息。
      *
      * @param purchaseDataList 购买数据
      */
@@ -228,12 +240,12 @@ public class OneStorePayManager {
         Log.e(TAG, "onLoadPurchaseAuto() :: purchaseDataList - " + purchaseDataList.toString());
         for (PurchaseData purchase : purchaseDataList) {
             Log.e(TAG, "========onLoadPurchaseAuto=============" + purchase.toString());
-            boolean result = AppSecurity.verifyPurchase(purchase.getPurchaseData(), purchase.getSignature());
+            boolean result = verifyPurchase(purchase.getPurchaseData(), purchase.getSignature());
         }
     }
 
     /**
-     * 在购买管理商品 (inapp) 后或购买历史记录视图完成后, 不消耗托管商品的消费.
+     * 在管理商品 (inapp) 后或历史记录视图完成后, 不消耗托管商品的消费.
      *
      * @param purchaseData 产品数据
      */
@@ -277,7 +289,7 @@ public class OneStorePayManager {
     }
 
     /**
-     * oneStore支付回调
+     * oneStore回调
      *
      * @param requestCode     请求码
      * @param resultCode      结果码
@@ -287,7 +299,7 @@ public class OneStorePayManager {
     public void onActivityResult(int requestCode, int resultCode, Intent data, int selfRequestCode) {
         if (requestCode == selfRequestCode)
                 /*
-                  异步购买的API
+                  异步的API
                  * launchPurchaseFlowAsync API 响应值通过在调用中传递的意图数据的手持采购值进行分析。
                  * 解析后的响应结果通过 "清除量" 侦听器传递。
                  */
@@ -301,16 +313,16 @@ public class OneStorePayManager {
     }
 
     /**
-     * 购买商品
+     * 获得商品
      *
      * @param productId       商品ID
      * @param selfRequestCode 请求码
      * @param productName     产品名称
      */
-    public void buyProduct(final Activity context, int selfRequestCode, String productName,
+    public void getProduct(final Activity context, int selfRequestCode, String productName,
                            final String productId,
                            final onOneStoreSupportListener mListener) {
-        Log.e(TAG, "buyProduct() - productId:" + productId);
+        Log.e(TAG, "getProduct() - productId:" + productId);
         if (mPurchaseClient == null) {
             mListener.onOneStoreClientFailed("PurchaseClient is not initialized");
             Log.e(TAG, "PurchaseClient is not initialized");
@@ -332,7 +344,7 @@ public class OneStorePayManager {
                             return;
                         }
                         // 完成购买后, 将执行签名验证。
-                        boolean validPurchase = AppSecurity.verifyPurchase(purchaseData.getPurchaseData(), purchaseData.getSignature());
+                        boolean validPurchase =verifyPurchase(purchaseData.getPurchaseData(), purchaseData.getSignature());
                         Log.e(TAG, "launchPurchaseFlowAsync verifyPurchase " + validPurchase);
                         if (validPurchase) {
                             if (!productId.equals(purchaseData.getProductId())) {
@@ -419,7 +431,7 @@ public class OneStorePayManager {
             Map<String, Object> map = new WeakHashMap<>();
             map.put("purchase_id", purchase_id);
             map.put("lt_order_id", devPayLoad);
-            LoginBackManager.oneStorePay(baseUrl, LTAppID, LTAppKey, map, new onOneStoreUploadListener() {
+            LoginBackManager.oneStorePlay(baseUrl, LTAppID, LTAppKey, map, new onOneStoreUploadListener() {
                 @Override
                 public void onOneStoreUploadSuccess(int result) {
                     if (!TextUtils.isEmpty(devPayLoad)) {
@@ -450,5 +462,48 @@ public class OneStorePayManager {
             mPurchaseClient = null;
         }
 
+    }
+
+    private   boolean verifyPurchase(String signedData, String signature) {
+        if (TextUtils.isEmpty(signedData) || TextUtils.isEmpty(signature)) {
+            return false;
+        }
+        PublicKey key = generatePublicKey(mPublicKey);
+        return verify(key, signedData, signature);
+    }
+
+    private  PublicKey generatePublicKey(String encodedPublicKey) {
+        try {
+            byte[] decodedKey = Base64.decode(encodedPublicKey, Base64.DEFAULT);
+            KeyFactory keyFactory = KeyFactory.getInstance(KEY_FACTORY_ALGORITHM);
+            return keyFactory.generatePublic(new X509EncodedKeySpec(decodedKey));
+        } catch (NoSuchAlgorithmException e) {
+            throw new SecurityException("RSA not available", e);
+        } catch (InvalidKeySpecException e) {
+            Log.e(TAG, "Invalid key specification.");
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    private  boolean verify(PublicKey publicKey, String signedData, String signature) {
+        try {
+            Signature sig = Signature.getInstance(SIGNATURE_ALGORITHM);
+            sig.initVerify(publicKey);
+            sig.update(signedData.getBytes());
+            if (!sig.verify(Base64.decode(signature, Base64.DEFAULT))) {
+                Log.e(TAG, "Signature verification failed.");
+                return false;
+            }
+            return true;
+        } catch (NoSuchAlgorithmException e) {
+            Log.e(TAG, "NoSuchAlgorithmException.");
+        } catch (InvalidKeyException e) {
+            Log.e(TAG, "Invalid key specification.");
+        } catch (SignatureException e) {
+            Log.e(TAG, "SignatureTest exception.");
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "Base64 decoding failed.");
+        }
+        return false;
     }
 }
